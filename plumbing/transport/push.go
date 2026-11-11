@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	internal "github.com/go-git/go-git/v6/internal/transport"
 	"github.com/go-git/go-git/v6/plumbing/protocol/capability"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/sideband"
@@ -144,7 +145,7 @@ func buildUpdateRequests(caps capability.List, req *PushRequest) *packp.UpdateRe
 		upreq.Capabilities.Set(capability.PushOptions)
 	}
 	if caps.Supports(capability.Agent) {
-		upreq.Capabilities.Set(capability.Agent, capability.DefaultAgent())
+		upreq.Capabilities.Set(capability.Agent, internal.AgentCapability(capability.DefaultAgent()))
 	}
 
 	upreq.Commands = req.Commands

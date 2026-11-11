@@ -7,6 +7,7 @@ import (
 	"io"
 	"slices"
 
+	internal "github.com/go-git/go-git/v6/internal/transport"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
@@ -146,7 +147,7 @@ func NegotiatePack(
 	}
 
 	if caps.Supports(capability.Agent) {
-		upreq.Capabilities.Set(capability.Agent, capability.DefaultAgent())
+		upreq.Capabilities.Set(capability.Agent, internal.AgentCapability(capability.DefaultAgent()))
 	}
 
 	if req.IncludeTags && caps.Supports(capability.IncludeTag) {

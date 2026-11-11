@@ -56,7 +56,7 @@ type CommandFunc func(ctx context.Context, cmd string, req packp.CommandArgs, re
 func ClientCapabilities(server capability.List) capability.List {
 	var caps capability.List
 	if agent := server.Get(capability.Agent); len(agent) > 0 {
-		caps.Set(capability.Agent, capability.DefaultAgent())
+		caps.Set(capability.Agent, AgentCapability(""))
 	}
 	if of := server.Get(capability.ObjectFormat); len(of) > 0 {
 		caps.Set(capability.ObjectFormat, of[0])
