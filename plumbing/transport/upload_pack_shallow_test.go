@@ -412,6 +412,31 @@ func TestGetShallowCommitsFollowsMergesAlongShortestPaths(t *testing.T) {
 	}
 }
 
+// TestGetShallowCommitsStopsAtRepositoryBoundary checks that a commit the
+// storer reports as shallow is a boundary at any depth, as upstream's
+// get_shallows_or_depth treats a graft: the walk stops there rather than
+// following parents the repository does not have.
+func TestGetShallowCommitsStopsAtRepositoryBoundary(t *testing.T) {
+	t.Parallel()
+	r := mergeHistory(t)
+	require.NoError(t, r.st.SetShallow(r.hashes([]string{"B"})))
+	wants := []plumbing.Hash{r.commits["D"]}
+
+	for depth, want := range map[int][]string{
+		1:             {"D"},
+		2:             {"M"},
+		3:             {"C", "Y"},
+		4:             {"B", "X"},
+		5:             {"B"},
+		6:             {"B"},
+		infiniteDepth: {"B"},
+	} {
+		got, err := getShallowCommits(context.Background(), r.st, wants, depth)
+		require.NoError(t, err)
+		require.Equal(t, want, r.names(got), "depth %d", depth)
+	}
+}
+
 // requireGitV2 skips the test unless git speaks protocol v2, which git
 // introduced in 2.18. Older versions parse the command as a v0 want line.
 func requireGitV2(t testing.TB) {
@@ -560,6 +585,222 @@ func TestUploadPackV2UnknownShallowsSendNoShallowInfo(t *testing.T) {
 	}))
 	require.Contains(t, out, "packfile\n")
 	require.NotContains(t, out, "shallow-info")
+}
+
+// v2ShallowInfo parses the shallow-info section of a v2 fetch response into
+// the shallow and unshallow commits it names, by commit name. It reports
+// whether the section was present at all.
+func (r *canonicalRepo) v2ShallowInfo(t testing.TB, out string) (shallows, unshallows []string, present bool) {
+	t.Helper()
+	if !strings.Contains(out, "shallow-info") {
+		return nil, nil, false
+	}
+	require.Greater(t, strings.Index(out, "packfile"), strings.Index(out, "shallow-info"),
+		"response has no packfile section")
+
+	rd := bytes.NewReader([]byte(out))
+	inSection := false
+	for {
+		_, line, err := pktline.ReadLine(rd)
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+		text := string(line)
+		switch {
+		case strings.HasPrefix(text, "shallow-info"):
+			inSection = true
+		case strings.HasPrefix(text, "packfile"):
+			slices.Sort(shallows)
+			slices.Sort(unshallows)
+			return shallows, unshallows, true
+		case !inSection:
+		case strings.HasPrefix(text, "shallow "):
+			hash := strings.TrimPrefix(text, "shallow ")
+			shallows = append(shallows, r.names([]plumbing.Hash{plumbing.NewHash(hash)})...)
+		case strings.HasPrefix(text, "unshallow "):
+			hash := strings.TrimPrefix(text, "unshallow ")
+			unshallows = append(unshallows, r.names([]plumbing.Hash{plumbing.NewHash(hash)})...)
+		}
+	}
+	require.Fail(t, "response has no packfile section")
+	return nil, nil, false
+}
+
+// TestUploadPackV2ShallowRepositoryReportsBoundary checks that a fetch from a
+// repository that is itself shallow reports the server's boundary, which is
+// where the pack ends. git sends it too: send_shallow_info runs whenever
+// is_repository_shallow holds, and with no deepen requested it calls
+// deepen(INFINITE_DEPTH), whose walk reports the repository's grafts.
+func TestUploadPackV2ShallowRepositoryReportsBoundary(t *testing.T) {
+	t.Parallel()
+	requireGitV2(t)
+
+	for _, tc := range []struct {
+		name string
+		// want is the commit the request wants; the server is shallow at B.
+		args     []string
+		shallows []string
+		// packCommits are the commits git sends; a boundary commit ships whole
+		// and its parents are omitted.
+		packCommits []string
+	}{
+		{
+			// B is the server's boundary: the pack stops there, so the client
+			// is told it is the client's boundary too.
+			name:        "no deepen",
+			args:        []string{"want D", "done"},
+			shallows:    []string{"B"},
+			packCommits: []string{"B", "C", "D", "M", "X", "Y"},
+		},
+		{
+			// The client already knows about B, so nothing new is reported.
+			name:        "client shallow at the boundary",
+			args:        []string{"want D", "shallow B", "done"},
+			packCommits: []string{"B", "C", "D", "M", "X", "Y"},
+		},
+		{
+			// M is above the boundary, but the client's shallow line makes M
+			// a graft too, so the pack stops at M and B is not reached.
+			name:        "client shallow above the boundary",
+			args:        []string{"want D", "shallow M", "done"},
+			packCommits: []string{"D", "M"},
+		},
+		{
+			// The depth walk stops at the boundary before reaching depth 4,
+			// and reports both B and the depth-4 boundary X.
+			name:        "deepen reaching the boundary early",
+			args:        []string{"want D", "deepen 4", "done"},
+			shallows:    []string{"B", "X"},
+			packCommits: []string{"B", "C", "D", "M", "X", "Y"},
+		},
+		{
+			// An infinite deepen from a shallow repository stops at the
+			// boundary rather than unshallowing everything.
+			name:        "infinite deepen",
+			args:        []string{"want D", "deepen 100", "done"},
+			shallows:    []string{"B"},
+			packCommits: []string{"B", "C", "D", "M", "X", "Y"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := mergeHistory(t)
+			require.NoError(t, r.st.SetShallow(r.hashes([]string{"B"})))
+
+			req, err := io.ReadAll(v2Request(t, "fetch", nil, r.hashesInLines(tc.args)))
+			require.NoError(t, err)
+
+			canonical := canonicalUploadPack(t, r, req, "GIT_PROTOCOL=version=2")
+			got := serveUploadPackV2Test(t, r.st, io.NopCloser(bytes.NewReader(req)))
+
+			canonicalShallows, canonicalUnshallows, canonicalPresent := r.v2ShallowInfo(t, string(canonical))
+			shallows, unshallows, present := r.v2ShallowInfo(t, got)
+			require.Equal(t, canonicalPresent, present, "shallow-info section presence")
+			// git can name the same commit twice when a graft is reached from
+			// two paths; only the set of boundary commits matters.
+			require.Equal(t, slices.Compact(canonicalShallows), shallows, "shallow lines")
+			require.Equal(t, canonicalUnshallows, unshallows, "unshallow lines")
+			require.Equal(t, tc.shallows, shallows)
+			require.Equal(t, tc.packCommits, r.packCommitNames(t, got))
+		})
+	}
+}
+
+// hashesInLines replaces commit names in request argument lines with their
+// hashes, so tests can name commits instead of spelling out ids.
+func (r *canonicalRepo) hashesInLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		for i, field := range fields {
+			if h, ok := r.commits[field]; ok {
+				fields[i] = h.String()
+			}
+		}
+		out = append(out, strings.Join(fields, " "))
+	}
+	return out
+}
+
+// packCommitNames lists the commits in a v2 fetch response's pack by name.
+func (r *canonicalRepo) packCommitNames(t testing.TB, out string) []string {
+	t.Helper()
+	at := strings.Index(out, "packfile\n")
+	require.NotEqual(t, -1, at, "response must carry a pack")
+	pack := memory.NewStorage()
+	demux := sideband.NewDemuxer(sideband.Sideband64k, strings.NewReader(out[at+len("packfile\n"):]))
+	require.NoError(t, packfile.UpdateObjectStorage(pack, demux))
+	return r.commitNames(pack)
+}
+
+// TestUploadPackV2ShallowRepositoryRevListReportsBoundary checks that the
+// rev-list based deepens stop at the server's boundary too: rev-list reads the
+// same grafts, so an ancestor the server does not have cannot make a boundary
+// commit a border.
+func TestUploadPackV2ShallowRepositoryRevListReportsBoundary(t *testing.T) {
+	t.Parallel()
+	requireGitV2(t)
+	r := mergeHistory(t)
+	require.NoError(t, r.st.SetShallow(r.hashes([]string{"B"})))
+	r.branch("a", "A")
+
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		shallows []string
+	}{
+		{
+			// A is below the boundary, so it is not in the walk and cannot
+			// exclude anything: nothing becomes a border.
+			name: "deepen-not below the boundary",
+			args: []string{"want D", "deepen-not refs/heads/a", "done"},
+		},
+		{
+			// C and M are older than the cutoff, so D and Y are the border
+			// commits; the boundary at B does not add one.
+			name:     "deepen-since below the boundary",
+			args:     []string{"want D", "deepen-since " + strconv.FormatInt(r.when.Add(-2*time.Minute).Unix(), 10), "done"},
+			shallows: []string{"C", "M"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, err := io.ReadAll(v2Request(t, "fetch", nil, r.hashesInLines(tc.args)))
+			require.NoError(t, err)
+
+			canonical := canonicalUploadPack(t, r, req, "GIT_PROTOCOL=version=2")
+			got := serveUploadPackV2Test(t, r.st, io.NopCloser(bytes.NewReader(req)))
+
+			canonicalShallows, _, canonicalPresent := r.v2ShallowInfo(t, string(canonical))
+			shallows, _, present := r.v2ShallowInfo(t, got)
+			require.Equal(t, canonicalPresent, present, "shallow-info section presence")
+			require.Equal(t, canonicalShallows, shallows, "shallow lines")
+			require.Equal(t, tc.shallows, shallows)
+		})
+	}
+}
+
+// TestUploadPackV1ShallowRepositorySendsNoBoundary checks that v0/v1 stays
+// silent about the server's boundary unless the client asked to deepen:
+// receive_needs returns before sending any shallow line otherwise, even from a
+// shallow repository.
+func TestUploadPackV1ShallowRepositorySendsNoBoundary(t *testing.T) {
+	t.Parallel()
+	r := mergeHistory(t)
+	require.NoError(t, r.st.SetShallow(r.hashes([]string{"B"})))
+
+	upreq := &packp.UploadRequest{}
+	upreq.Capabilities.Add("shallow")
+	upreq.Wants = r.hashes([]string{"D"})
+	req := encodeV1Request(t, upreq, r.commits["D"])
+
+	canonical := parseV1Response(t, r, canonicalUploadPack(t, r, req))
+	got := parseV1Response(t, r, goGitUploadPack(t, r, req))
+	require.Equal(t, canonical.shallows, got.shallows, "shallow lines")
+	require.Equal(t, canonical.unshallows, got.unshallows, "unshallow lines")
+	require.Empty(t, got.shallows)
+	require.Empty(t, got.unshallows)
 }
 
 // TestPlanShallowStopsWhenCancelled checks that the shallow walks give up once
