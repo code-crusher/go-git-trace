@@ -118,6 +118,25 @@ func TestAdvertiseRefsSkipsUnadvertisableNames(t *testing.T) {
 	}
 }
 
+// The agent capability value must not contain a space (issue #2496): the
+// capability list is space-delimited, so a space would split the agent into
+// a bogus extra capability. Git replaces the space with a '.'.
+func TestAdvertiseRefsAgentHasNoSpace(t *testing.T) {
+	t.Setenv("GO_GIT_USER_AGENT_EXTRA", "myapp/1.0")
+
+	st := memory.NewStorage()
+
+	var buf bytes.Buffer
+	require.NoError(t, AdvertiseRefs(
+		context.Background(), st, ioutil.WriteNopCloser(&buf),
+		UploadPackService, false, protocol.V0,
+	))
+
+	out := buf.String()
+	assert.Contains(t, out, "agent=go-git/6.x.myapp/1.0")
+	assert.NotContains(t, out, "go-git/6.x myapp")
+}
+
 func TestAdvertisable(t *testing.T) {
 	t.Parallel()
 

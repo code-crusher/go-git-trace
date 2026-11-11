@@ -140,6 +140,23 @@ func TestBuildUpdateRequestsWithAgent(t *testing.T) {
 	assert.True(t, upreq.Capabilities.Supports(capability.Agent))
 }
 
+func TestBuildUpdateRequestsAgentHasNoSpace(t *testing.T) {
+	t.Setenv("GO_GIT_USER_AGENT_EXTRA", "myapp/1.0")
+	caps := capability.List{}
+	caps.Set(capability.Agent, "git/2.45.0")
+
+	req := &PushRequest{
+		Commands: []*packp.Command{
+			{Name: "refs/heads/master", Old: plumbing.ZeroHash, New: plumbing.NewHash("0123456789012345678901234567890123456789")},
+		},
+	}
+
+	upreq := buildUpdateRequests(caps, req)
+	// The agent capability is space-delimited on the wire, so its value must
+	// not contain a space (issue #2496); git replaces one with '.'.
+	assert.Equal(t, []string{"go-git/6.x.myapp/1.0"}, upreq.Capabilities.Get(capability.Agent))
+}
+
 type mockWriter struct {
 	data []byte
 }

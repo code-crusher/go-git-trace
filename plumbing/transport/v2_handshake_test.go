@@ -41,6 +41,20 @@ func TestStreamSessionV2Handshake(t *testing.T) {
 	require.NotEmpty(t, caps.Get(capability.ObjectFormat))
 }
 
+func TestStreamSessionV2HandshakeAgentHasNoSpace(t *testing.T) {
+	t.Setenv("GO_GIT_USER_AGENT_EXTRA", "myapp/1.0")
+	st := basicV2Storage(t)
+
+	var adv bytes.Buffer
+	require.NoError(t, AdvertiseCapabilities(context.TODO(), st, &adv, UploadPackService))
+
+	// Decode the advertisement the way a v2 client would: the agent value must
+	// carry no space (issue #2496), or it would parse as two capabilities.
+	decoded := &packp.CapabilityAdv{}
+	require.NoError(t, decoded.Decode(&adv))
+	require.Equal(t, []string{"go-git/6.x.myapp/1.0"}, decoded.Capabilities.Get(capability.Agent))
+}
+
 func TestStreamSessionCommandEnvelope(t *testing.T) {
 	t.Parallel()
 

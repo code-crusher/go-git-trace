@@ -356,6 +356,27 @@ func negotiatePackMultiRound(t *testing.T, statelessRPC bool) *mockWriteCloser {
 	return writer
 }
 
+func TestNegotiatePackAgentHasNoSpace(t *testing.T) {
+	t.Setenv("GO_GIT_USER_AGENT_EXTRA", "myapp/1.0")
+
+	caps := capability.List{}
+	caps.Set(capability.Agent, "git/2.45.0")
+	writer := newMockWriteCloser(nil)
+	req := &FetchRequest{
+		Wants: []plumbing.Hash{plumbing.NewHash("6ecf0ef2c2dffb796033e5a02219af86ec6584e5")},
+	}
+
+	_, err := NegotiatePack(context.TODO(), memory.NewStorage(), caps, false,
+		bytes.NewReader([]byte("0008NAK\n")), writer, req)
+	require.NoError(t, err)
+
+	sent := &packp.UploadRequest{}
+	require.NoError(t, sent.Decode(writer.writeBuf))
+	// The agent capability is space-delimited on the wire, so its value must
+	// not contain a space (issue #2496); git replaces one with '.'.
+	assert.Equal(t, []string{"go-git/6.x.myapp/1.0"}, sent.Capabilities.Get(capability.Agent))
+}
+
 func makeSyntheticHaves(n int, keep ...plumbing.Hash) []plumbing.Hash {
 	haves := make([]plumbing.Hash, 0, n)
 	haves = append(haves, keep...)
