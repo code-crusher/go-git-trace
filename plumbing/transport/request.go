@@ -25,4 +25,9 @@ type Request struct {
 	Args    []string
 
 	Protocol protocol.Version
+
+	// UserAgent identifies the client to the remote, in the HTTP User-Agent
+	// header and in the agent capability; it defaults to
+	// capability.DefaultAgent().
+	UserAgent string
 }

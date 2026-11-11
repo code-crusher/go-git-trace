@@ -105,6 +105,7 @@ func TestReceivePackRequestFraming(t *testing.T) {
 							client:     client,
 							baseURL:    baseURL,
 							service:    test.service,
+							userAgent:  capability.DefaultAgent(),
 							authorizer: auth.Authorizer,
 						}},
 					}
