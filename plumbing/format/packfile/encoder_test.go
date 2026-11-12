@@ -2,6 +2,7 @@ package packfile
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"io"
 	"testing"
 
@@ -81,6 +82,39 @@ func (s *EncoderSuite) TestCorrectPackWithOneEmptyObject() {
 	decoded, err := p.Get(o.Hash())
 	s.NoError(err)
 	objectsEqual(s, decoded, o)
+}
+
+// TestFooterMatchesReferenceSHA1 recomputes the pack checksum with
+// crypto/sha1 and compares it to the footer the encoder wrote. The
+// encoder streams its bytes into sha1cd rather than crypto/sha1, so a
+// digest divergence between the two shows up here as a mismatch instead
+// of surfacing later as a parser error on a saved pack (go-git#2425).
+func (s *EncoderSuite) TestFooterMatchesReferenceSHA1() {
+	payloads := [][]byte{
+		[]byte("hello"),
+		[]byte("hello world"),
+		bytes.Repeat([]byte("abcdefgh"), 1024),
+	}
+
+	hashes := make([]plumbing.Hash, 0, len(payloads))
+	for _, p := range payloads {
+		o := newObject(plumbing.BlobObject, p)
+		_, err := s.store.SetEncodedObject(o)
+		s.NoError(err)
+		hashes = append(hashes, o.Hash())
+	}
+
+	h, err := s.enc.Encode(hashes, 10)
+	s.NoError(err)
+
+	pack := s.buf.Bytes()
+	s.Require().GreaterOrEqual(len(pack), sha1.Size)
+
+	body, footer := pack[:len(pack)-sha1.Size], pack[len(pack)-sha1.Size:]
+	want := sha1.Sum(body)
+
+	s.Equal(want[:], footer)
+	s.Equal(h.Bytes(), footer)
 }
 
 func (s *EncoderSuite) TestMaxObjectSize() {

@@ -1,12 +1,15 @@
 package hash
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/sha1"
 	"crypto/sha512"
 	"encoding/hex"
 	"hash"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -100,5 +103,87 @@ func TestSha1Collision(t *testing.T) { //nolint: paralleltest // modifies global
 				t.Errorf("\n   got: %q\nwanted: %q", got, tt.hash)
 			}
 		})
+	}
+}
+
+// TestDefaultSHA1MatchesReference pins the SHA-1 implementation used for
+// pack and object hashing to the digests computed by crypto/sha1.
+//
+// The default implementation is sha1cd, which adds collision detection on
+// top of SHA-1 and has platform-specific assembly. A digest divergence
+// there is silent at hashing time and only surfaces later as a
+// "checksum mismatch" when a pack footer or index is validated, as
+// reported in go-git#2425. Sizes straddle the 64-byte block boundary
+// because the assembly processes whole blocks.
+func TestDefaultSHA1MatchesReference(t *testing.T) {
+	t.Parallel()
+
+	payload := make([]byte, 1<<16)
+	for i := range payload {
+		payload[i] = byte(i * 7)
+	}
+
+	sizes := []int{0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 129, 1000, 4096, 65536}
+	for _, size := range sizes {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			t.Parallel()
+
+			want := sha1.Sum(payload[:size])
+
+			h := New(crypto.SHA1)
+			_, err := h.Write(payload[:size])
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got := h.Sum(nil); !bytes.Equal(got, want[:]) {
+				t.Errorf("digest of %d bytes: got %x, want %x", size, got, want)
+			}
+		})
+	}
+}
+
+// TestDefaultSHA1ConcurrentMatchesReference hashes independent payloads
+// from several goroutines. The regression behind go-git#2425 was only
+// observed under the race detector, where the assembly implementation
+// saw register values that made it skip a block. Hashing the same
+// payloads concurrently keeps the implementation on that path.
+func TestDefaultSHA1ConcurrentMatchesReference(t *testing.T) {
+	t.Parallel()
+
+	const (
+		goroutines = 8
+		rounds     = 50
+	)
+
+	payload := make([]byte, 10000)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	want := sha1.Sum(payload)
+
+	got := make(chan []byte, goroutines)
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Go(func() {
+			for range rounds {
+				h := New(crypto.SHA1)
+				_, err := h.Write(payload)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if sum := h.Sum(nil); !bytes.Equal(sum, want[:]) {
+					got <- sum
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(got)
+
+	for sum := range got {
+		t.Errorf("got %x, want %x", sum, want)
 	}
 }
