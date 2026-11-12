@@ -170,6 +170,13 @@ func (p *objectWalker) walkObjectTree(hash plumbing.Hash) error {
 		}
 	case *object.Tree:
 		for i := range obj.Entries {
+			// A gitlink names a commit in another repository's
+			// history. The superproject need not contain it, and
+			// keeping a locally present one reachable would retain
+			// objects this repository does not own (#2540).
+			if obj.Entries[i].Mode == filemode.Submodule {
+				continue
+			}
 			// Shortcut for blob objects:
 			// 'or' the lower bits of a mode and check that it
 			// it matches a filemode.Executable. The type information
@@ -204,6 +211,12 @@ func (p *objectWalker) walkObjectTree(hash plumbing.Hash) error {
 		}
 	case *object.Tag:
 		return p.walkObjectTree(obj.Target)
+	case *object.Blob:
+		// Blobs are leaves. A symlink entry reaches this case because
+		// only regular and executable files take the tree shortcut
+		// above, and an annotated tag may target a blob directly. The
+		// lookup above already confirmed the blob is present.
+		return nil
 	default:
 		// Error out on unhandled object types.
 		return fmt.Errorf("unknown object %X %s %T", obj.ID(), obj.Type(), obj)
